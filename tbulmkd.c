@@ -24,18 +24,133 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/mount.h>
+#include <poll.h>
 #include "common.h"
 #include "shm.h"
+#include "tbulmkd.h"
 
 #define PFX "tbulkmd: "
 
+static struct tasklist_mem *tasklist_mem;
+
+#define THRES_NR 2
+struct mem_threshold mem_thresholds[THRES_NR];
+
+enum {
+	THRES_DAEMONS_IDX	= 0,
+	THRES_APPS_IDX		= 1,
+};
+
+static char *exemption_list[MAX_NR_TASKS];
+static int exemption_list_len;
+
+#define POLL_TIMEOUT 1000
+
+static pid_t select_pid_rss(int idx, ulong *max_rss)
+{
+	pid_t last_pid = 0;
+	int i;
+
+	sem_wait(&tasklist_mem->sem);
+
+	for (i = 0; i < MAX_NR_TASKS; i++) {
+		struct task_info_shm *tis;
+		struct task_info ti;
+		pid_t pid;
+		int j;
+
+		tis = &tasklist_mem->tasks[i];
+		pid = tis->pid;
+		if (!pid)
+			break;
+
+		if ((idx == THRES_DAEMONS_IDX && tis->tty_nr) ||
+		    (idx == THRES_APPS_IDX && !tis->tty_nr))
+			continue;
+
+		if (get_task_info_stat(pid, NULL, &ti))
+			continue;
+
+		// debug
+//		if (strcmp("m", ti.name)) {
+//			put_task_info(&ti);
+//			continue;
+//		}
+
+		if (ti.rss > *max_rss) {
+			*max_rss = ti.rss;
+			last_pid = pid;
+		}
+
+		put_task_info(&ti);
+	}
+
+	sem_post(&tasklist_mem->sem);
+
+	return last_pid;
+}
+
+static void poll_lowmem(void)
+{
+	struct pollfd pollfds[THRES_NR];
+
+	setup_events(pollfds, THRES_DAEMONS_IDX);
+	setup_events(pollfds, THRES_APPS_IDX);
+
+	while (poll(pollfds, THRES_NR, POLL_TIMEOUT) > 0) {
+		int i;
+
+		if (DEBUG) {
+			print_timestamp();
+			puts("got lowmem event");
+		}
+
+		for (i = 0; i < THRES_NR; i++) {
+			struct mem_threshold *thres = &mem_thresholds[i];
+
+			if (pollfds[i].revents & POLLIN) {
+				process_event(i);
+
+				while (get_mem_usage(i) >= thres->mem_limit) {
+					struct task_info ti;
+					ulong rss = 0;
+					pid_t pid = select_pid_rss(i, &rss);
+
+					if (!pid)
+						continue;
+
+					if (get_task_info_stat(pid, NULL, &ti))
+						continue;
+
+					print_timestamp();
+					printf("[cgroups] killing %d rss %luMiB"
+					       " (%s)\n", pid, rss / 1024 / 1024,
+					       ti.name);
+					put_task_info(&ti);
+					kill(pid, SIGKILL);
+
+					sleep(1);
+				}
+			}
+		}
+	}
+
+	cleanup_events(THRES_APPS_IDX);
+	cleanup_events(THRES_DAEMONS_IDX);
+}
+
+
 static int timeout = 60; /* timeout in seconds */
 static int use_cgroups = 0;
+static int apps_mem_percent = 90;
+static int daemons_mem_percent = 10;
 
 static void print_usage(char *argv0)
 {
 	printf("Usage: %s [OPTION]...\n"
 	       "\n"
+	       "-a, --apps	set memory percent for apps cgmem\n"
+	       "-d, --daemons	set memory percent for daemons cgmem\n"
 	       "-c, --cgroups	use control groups memory controller\n"
 	       "-t, --timeout	set timeout (in seconds)\n"
 	       "-h, --help	display this help message\n"
@@ -46,33 +161,51 @@ static void print_usage(char *argv0)
 static void parse_args(int argc, char *argv[])
 {
 	struct option opts[] = {
+		{ "apps",	1, NULL, 'a' },
+		{ "daemons",	1, NULL, 'd' },
 		{ "cgroups",	0, NULL, 'c' },
 		{ "timeout",	1, NULL, 't' },
 		{ "help",	0, NULL, 'h' },
 	};
 	int c;
 
-	c = getopt_long(argc, argv, "t:hc", opts, NULL);
-	if (c < 0)
-		return;
+	while (1) {
+		c = getopt_long(argc, argv, "a:d:t:hc", opts, NULL);
+		if (c < 0)
+			break;
 
-	switch (c) {
-	case 'c':
-		use_cgroups = 1;
-		printf("using control groups memory controller\n");
-		break;
-	case 't':
-		timeout = atoi(optarg);
-		break;
-	case 'h':
-		print_usage(argv[0]);
-		exit(1);
-		break;
+		switch (c) {
+		case 'a':
+			apps_mem_percent = atoi(optarg);
+			print_timestamp();
+			printf("using %d%% of memory for apps cgmem\n",
+			       apps_mem_percent);
+			break;
+		case 'd':
+			daemons_mem_percent = atoi(optarg);
+			print_timestamp();
+			printf("using %d%% of memory for daemons cgmem\n",
+			       daemons_mem_percent);
+			break;
+		case 'c':
+			use_cgroups = 1;
+			print_timestamp();
+			printf("using control groups memory controller\n");
+			break;
+		case 't':
+			timeout = atoi(optarg);
+			print_timestamp();
+			printf("using %d seconds timeout\n", timeout);
+			break;
+		case 'h':
+			print_usage(argv[0]);
+			exit(1);
+			break;
+		}
 	}
 }
 
 static int tasklist_fd;
-static struct tasklist_mem *tasklist_mem;
 
 void init_tasklist(void)
 {
@@ -100,9 +233,6 @@ void free_tasklist(void)
 }
 
 static char *config_file = "tbulmkd.cfg";
-
-static char *exemption_list[MAX_NR_TASKS];
-static int exemption_list_len;
 
 #define MAX_TASK_NAME 100
 
@@ -145,10 +275,8 @@ static void print_exemption_list(void)
 	printf("Exemption list:\n");
 
 	for (i = 0; i < exemption_list_len; i++) {
-		printf("%s\n", exemption_list[i]);
+		printf("\t%s\n", exemption_list[i]);
 	}
-
-	printf("\n");
 }
 
 static void free_config_file(void)
@@ -176,6 +304,7 @@ static void init_cgroups(void)
 	char buf[4096];
 	unsigned long int memtotal;
 	int i;
+	float t;
 
 	f = fopen("/proc/meminfo", "r");
 	if (!f)
@@ -221,7 +350,8 @@ static void init_cgroups(void)
 	if (!f)
 		pabort("fopen /sys/fs/cgroup/memory/daemons/memory.limit_in_bytes");
 
-	i = sprintf(buf, "%lu", (unsigned long int)(0.8 * memtotal));
+	t = (float)daemons_mem_percent / 100 * memtotal;
+	i = sprintf(buf, "%lu", (unsigned long int)t);
 	if (DEBUG)
 		printf("daemons limit: %s\n", buf);
 	if (fwrite(buf, i, 1, f) != 1)
@@ -238,11 +368,35 @@ static void init_cgroups(void)
 	if (!f)
 		pabort("fopen /sys/fs/cgroup/memory/apps/memory.limit_in_bytes");
 
-	i = sprintf(buf, "%lu", (unsigned long int)(0.8 * memtotal));
+	t = (float)apps_mem_percent / 100 * memtotal;
+	i = sprintf(buf, "%lu", (unsigned long int)t);
+	// debug
+//	i = sprintf(buf, "%lu", 100000000UL);
 	if (DEBUG)
-		printf("apps limit: %s\n\n", buf);
+		printf("apps limit: %s\n", buf);
 	if (fwrite(buf, i, 1, f) != 1)
 		pabort("fwrite apps\n");
+
+	fclose(f);
+
+	/* disable kernel OOM killer */
+	i = sprintf(buf, "1");
+
+	f = fopen("/sys/fs/cgroup/memory/daemons/memory.oom_control", "w");
+	if (!f)
+		pabort("fopen /sys/fs/cgroup/memory/daemons/memory.oom_control");
+
+	if (fwrite(buf, i, 1, f) != 1)
+		pabort("fwrite daemons/memory.oom_control\n");
+
+	fclose(f);
+
+	f = fopen("/sys/fs/cgroup/memory/apps/memory.oom_control", "w");
+	if (!f)
+		pabort("fopen /sys/fs/cgroup/memory/apps/memory.oom_control");
+
+	if (fwrite(buf, i, 1, f) != 1)
+		pabort("fwrite apps/memory.oom_control\n");
 
 	fclose(f);
 }
@@ -303,10 +457,8 @@ static void print_bg_tasks(void)
 	for (i = 0; i < MAX_LIVE_BG_TASKS; i++) {
 		struct bg_task *bt = &live_bg_tasks[i];
 
-		printf("%d pid %d time %u\n", i, bt->pid, (unsigned)bt->time);
+		printf("\t%d pid %d time %u\n", i, bt->pid, (unsigned)bt->time);
 	}
-
-	printf("\n");
 }
 
 int main(int argc, char *argv[])
@@ -317,14 +469,14 @@ int main(int argc, char *argv[])
 	if (DEBUG)
 		print_exemption_list();
 
-	if (use_cgroups)
-		init_cgroups();
-
 	ret = mlockall(MCL_FUTURE);
 	if (ret)
 		pabort("mlockall");
 
 	parse_args(argc, argv);
+
+	if (use_cgroups)
+		init_cgroups();
 
 	init_tasklist();
 
@@ -415,14 +567,27 @@ next_task:
 			if (t - tis->time <= timeout)
 				continue;
 
-			get_task_info(pid, NULL, &ti);
+			if (get_task_info_stat(pid, NULL, &ti))
+				continue;
+
+			/* skip kernel threads */
+			if (!ti.rss) {
+				if (DEBUG) {
+					print_timestamp();
+					printf("skipping pid (rss = 0)"
+					       "%d (%s)\n", pid, ti.name);
+				}
+				put_task_info(&ti);
+				continue;
+			}
 
 			for (j = 0; j < exemption_list_len; j++) {
 				if (!strcmp(exemption_list[j], ti.name)) {
 					if (DEBUG) {
 						print_timestamp();
-						printf("skipping exempted pid "
-						       "%d (%s)\n", pid, ti.name);
+						printf("[timeout] skipping "
+						       "exempted pid %d (%s)\n",
+						       pid, ti.name);
 					}
 					put_task_info(&ti);
 					i++;
@@ -431,15 +596,18 @@ next_task:
 			}
 
 			print_timestamp();
-			printf("killing %d timeout %d secs rss %luMiB (%s)\n",
-			       pid, (unsigned)(t - tis->time),
+			printf("[timeout] killing %d timeout %d secs rss %luMiB"
+			       " (%s)\n", pid, (unsigned)(t - tis->time),
 			       ti.rss / 1024 / 1024, ti.name);
 			put_task_info(&ti);
 			kill(pid, SIGKILL);
 		}
 		sem_post(&tasklist_mem->sem);
 
-		sleep(1);
+		if (use_cgroups)
+			poll_lowmem();
+		else
+			sleep(1);
 	};
 
 	free_tasklist();
