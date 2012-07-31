@@ -25,6 +25,7 @@ struct task_info {
 	time_t time;
 	int activity;
 	ulong rss;
+	int tty_nr;
 };
 
 int get_task_info(pid_t pid, const char *dname, struct task_info *ti);

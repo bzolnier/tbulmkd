@@ -24,6 +24,7 @@ struct task_info_shm {
 	pid_t pid;
 	time_t time; /* last update to activity */
 	int activity; /* 1 == foreground, 0 == background */
+	int tty_nr;
 };
 
 struct tasklist_mem {

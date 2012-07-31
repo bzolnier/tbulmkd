@@ -53,7 +53,11 @@ static void parse_stat(char *s, struct task_info *ti)
 			break;
 		switch (i) {
 		case 1:
-			ti->name = strdup(s);
+			ti->name = strdup(s + 1);
+			ti->name[strlen(s) - 2] = '\0';
+			break;
+		case 6:
+			ti->tty_nr = atoi(s);
 			break;
 		case 23:
 			ti->rss = atoi(s);
@@ -63,6 +67,42 @@ static void parse_stat(char *s, struct task_info *ti)
 		i++;
 	}
 	pabort("/proc/pid/stat parse");
+}
+
+int get_task_info_stat(pid_t pid, const char *dname, struct task_info *ti)
+{
+	int stat_fd;
+	ssize_t sz;
+	char buf[4096];
+	char *name = buf;
+	char *t;
+
+	t = buf;
+	t = stpcpy(t, "/proc/");
+	if (pid)
+		t += sprintf(t, "%d", pid);
+	else
+		t = stpcpy(t, dname);
+	t = stpcpy(t, "/stat");
+
+	stat_fd = open(name, O_RDONLY);
+	if (stat_fd < 0)
+//		pabort("open stat");
+		return EBADF;
+
+	sz = read(stat_fd, buf, sizeof(buf));
+	if (sz <= 0) {
+		close(stat_fd);
+		return EBADF;
+	}
+//		pabort("read stat");
+
+	parse_stat(buf, ti);
+	ti->rss = ti->rss * sysconf(_SC_PAGESIZE);
+
+	close(stat_fd);
+
+	return 0;
 }
 
 int get_task_info(pid_t pid, const char *dname, struct task_info *ti)

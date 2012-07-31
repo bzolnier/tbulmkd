@@ -47,14 +47,19 @@ static void update_tasks(void)
 			continue;
 
 		if (get_task_info(0, dname, &ti))
+//		if (get_task_info_stat(0, dname, &ti))
 			continue;
 
 		printf("%s %d %u\n", dname, ti.activity, (unsigned)ti.time);
+//		printf("%s %d %lu\n", dname, ti.tty_nr, ti.rss / 1024 / 1024);
 
 		sem_wait(&tasklist_mem->sem);
 		tasklist_mem->tasks[i].pid = atoi(dname);
 		tasklist_mem->tasks[i].activity = ti.activity;
 		tasklist_mem->tasks[i].time = ti.time;
+//		tasklist_mem->tasks[i].activity = 1;
+//		tasklist_mem->tasks[i].time = time(NULL);
+		tasklist_mem->tasks[i].tty_nr = ti.tty_nr;
 		i++;
 		if (i < MAX_NR_TASKS)
 			tasklist_mem->tasks[i].pid = 0;

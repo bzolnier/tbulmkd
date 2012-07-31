@@ -1,13 +1,18 @@
 
 CC=arm-linux-gnueabi-gcc
+#CFLAGS += -DDEBUG=0
+CFLAGS += -DDEBUG=1
 
-all: tbulmkd proxy_shm
+all: tbulmkd proxy_shm m
 
 tbulmkd: tbulmkd.c common.c
-	$(CC) -o $@ $< common.c -lpthread -lrt
+	$(CC) -o $@ $< common.c $(CFLAGS) -lpthread -lrt
 
 proxy_shm: proxy_shm.c common.c
-	$(CC) -o $@ $< common.c -lpthread -lrt
+	$(CC) -o $@ $< common.c $(CFLAGS) -lpthread -lrt
+
+m: m.c m.c
+	$(CC) -o $@ $< $(CFLAGS)
 
 clean:
-	rm -f tbulmkd proxy_shm
+	rm -f tbulmkd proxy_shm m
