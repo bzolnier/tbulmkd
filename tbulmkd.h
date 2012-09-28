@@ -26,6 +26,14 @@ extern struct mem_threshold mem_thresholds[2];
 
 struct pollfd;
 
+int apps_mem_percent;
+int daemons_mem_percent;
+
+void free_cgroup(void);
+void init_cgroups(void);
+void add_pid_to_daemons_cgroup(pid_t pid);
+void add_pid_to_apps_cgroup(pid_t pid);
+
 int setup_events(struct pollfd *pollfds, int idx);
 void cleanup_events(int idx);
 void process_event(int idx);

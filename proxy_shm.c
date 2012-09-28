@@ -28,6 +28,17 @@
 
 struct tasklist_mem *tasklist_mem;
 
+/**
+ *	update_tasks - update tasklist_mem task list
+ *
+ *	Fill tasklist_mem task list for all tasks in the system using
+ *	information from /proc/$pid/stat and /proc/$pid/activity[_time].
+ *
+ *	tasklist_mem list is terminated by using task entry with PID == 0.
+ *
+ *	This function needs to take tasklist_sem->sem semaphore to protect
+ *	access to tasklist_mem task list.
+ */
 static void update_tasks(void)
 {
 	DIR *dir;
@@ -69,6 +80,10 @@ static void update_tasks(void)
 	closedir(dir);
 }
 
+/*
+ * Creates and mmap()s shared memory area containing list of tasks.
+ * Then updates tasklist_mem task list once for every second.
+ */
 int main(void)
 {
 	int tasklist_fd;

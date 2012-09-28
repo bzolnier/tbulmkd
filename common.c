@@ -42,6 +42,15 @@ void print_timestamp(void)
 	printf(PFX "[%ld.%.9ld] ", ts.tv_sec, ts.tv_nsec);
 }
 
+/**
+ *	parse_stat - parse /proc/$pid/stat information
+ *	@s: stat string
+ *	@ti: task info instance
+ *
+ *	Parse @s stat string extracting task name, TTY number
+ *	and RSS value in pages (stat entries 1, 6 and 23) and
+ *	storing them in @ti task info instance.
+ */
 static void parse_stat(char *s, struct task_info *ti)
 {
 	char *_s = s;
@@ -69,6 +78,18 @@ static void parse_stat(char *s, struct task_info *ti)
 	pabort("/proc/pid/stat parse");
 }
 
+/**
+ *	get_task_info_stat - get task information from /proc/$pid/stat
+ *	@pid: task PID number
+ *	@dname: task PID string
+ *	@ti: task info instance
+ *
+ *	Get task information (task name, TTY number and RSS value in bytes)
+ *	from /proc/$pid/stat using either @pid task PID number or @dname
+ *	task PID string and store it in @ti task info instance.
+ *
+ *	Returns 0 on success, EBADF on failure.
+ */
 int get_task_info_stat(pid_t pid, const char *dname, struct task_info *ti)
 {
 	int stat_fd;
@@ -105,6 +126,20 @@ int get_task_info_stat(pid_t pid, const char *dname, struct task_info *ti)
 	return 0;
 }
 
+/**
+ *	get_task_info - get task information
+ *	@pid: task PID number
+ *	@dname: task PID string
+ *	@ti: task info instance
+ *
+ *	Get task information (task name, TTY number and RSS value in bytes)
+ *	from /proc/$pid/stat using either @pid task PID number or @dname
+ *	task PID string and store it in @ti task info instance. Also get
+ *	information about task activity from /proc/$pid/activity and time
+ *	of last activity change from /proc/$pid/activity_time.
+ *
+ *	Returns 0 on success, EBADF on failure.
+ */
 int get_task_info(pid_t pid, const char *dname, struct task_info *ti)
 {
 	int activity_time_fd;
@@ -134,7 +169,7 @@ int get_task_info(pid_t pid, const char *dname, struct task_info *ti)
 
 	activity_fd = open(name, O_RDONLY);
 	if (activity_fd < 0)
-		pabort("open stat");
+		pabort("open activity");
 
 	t = pid_dir_end;
 	t = stpcpy(t, "/stat");
@@ -168,6 +203,12 @@ int get_task_info(pid_t pid, const char *dname, struct task_info *ti)
 	return 0;
 }
 
+/**
+ *	put_task_info - put task information
+ *	@ti: task info instance
+ *
+ *	Free memory used for task name.
+ */
 void put_task_info(struct task_info *ti)
 {
 	free(ti->name);;

@@ -19,9 +19,160 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <sys/eventfd.h>
+#include <string.h>
 #include <poll.h>
 #include "tbulmkd.h"
 #include "common.h"
+
+void free_cgroup(void)
+{
+	rmdir("/sys/fs/cgroup/memory/apps");
+	rmdir("/sys/fs/cgroup/memory/daemons");
+	umount("/sys/fs/cgroup/memory");
+	rmdir("/sys/fs/cgroup/memory");
+	umount("/sys/fs/cgroup");
+}
+
+void init_cgroups(void)
+{
+	FILE *f;
+	char buf[4096];
+	unsigned long int memtotal;
+	int i;
+	float t;
+
+	f = fopen("/proc/meminfo", "r");
+	if (!f)
+		pabort("fopen /proc/meminfo");
+
+	while (fgets(buf, sizeof(buf), f)) {
+		if (strstr(buf, "MemTotal")) {
+			if (sscanf(buf, "MemTotal: %lu kB", &memtotal) != 1) {
+				fclose(f);
+				return;
+			} else {
+				memtotal *= 1024;
+				break;
+			}
+		}
+	}
+
+	fclose(f);
+
+	if (DEBUG)
+		printf("memtotal: %lu\n", memtotal);
+
+	free_cgroup();
+
+	/* mount -t tmpfs none /sys/fs/cgroup */
+	if (mount(NULL, "/sys/fs/cgroup", "tmpfs", 0, NULL))
+		pabort("mount /sys/fs/cgroup");
+
+	/* mkdir /sys/fs/cgroup/memory */
+	if (mkdir("/sys/fs/cgroup/memory", 755))
+		pabort("mkdir /sys/fs/cgroup/memory");
+
+	/* mount -t cgroup none /sys/fs/cgroup/memory -o memory */
+	if (mount(NULL, "/sys/fs/cgroup/memory", "cgroup", 0, "memory"))
+		pabort("mount /sys/fs/cgroup/memory");
+
+	/* mkdir /sys/fs/cgroup/memory/daemons */
+	mkdir("/sys/fs/cgroup/memory/daemons", 755);
+//		pabort("mkdir /sys/fs/cgroup/memory/daemons");
+
+	/* echo 80%*MemTotal > /sys/fs/cgroup/memory/daemons/memory.limit_in_bytes */
+	f = fopen("/sys/fs/cgroup/memory/daemons/memory.limit_in_bytes", "w");
+	if (!f)
+		pabort("fopen /sys/fs/cgroup/memory/daemons/memory.limit_in_bytes");
+
+	t = (float)daemons_mem_percent / 100 * memtotal;
+	i = sprintf(buf, "%lu", (unsigned long int)t);
+	if (DEBUG)
+		printf("daemons limit: %s\n", buf);
+	if (fwrite(buf, i, 1, f) != 1)
+		pabort("fwrite daemons\n");
+
+	fclose(f);
+
+	/* mkdir /sys/fs/cgroup/memory/apps */
+	mkdir("/sys/fs/cgroup/memory/apps", 755);
+//		pabort("mkdir /sys/fs/cgroup/memory/apps");
+
+	/* echo 80%*MemTotal > /sys/fs/cgroup/memory/apps/memory.limit_in_bytes */
+	f = fopen("/sys/fs/cgroup/memory/apps/memory.limit_in_bytes", "w");
+	if (!f)
+		pabort("fopen /sys/fs/cgroup/memory/apps/memory.limit_in_bytes");
+
+	t = (float)apps_mem_percent / 100 * memtotal;
+	i = sprintf(buf, "%lu", (unsigned long int)t);
+	// debug
+//	i = sprintf(buf, "%lu", 100000000UL);
+	if (DEBUG)
+		printf("apps limit: %s\n", buf);
+	if (fwrite(buf, i, 1, f) != 1)
+		pabort("fwrite apps\n");
+
+	fclose(f);
+
+	/* disable kernel OOM killer */
+	i = sprintf(buf, "1");
+
+	f = fopen("/sys/fs/cgroup/memory/daemons/memory.oom_control", "w");
+	if (!f)
+		pabort("fopen /sys/fs/cgroup/memory/daemons/memory.oom_control");
+
+	if (fwrite(buf, i, 1, f) != 1)
+		pabort("fwrite daemons/memory.oom_control\n");
+
+	fclose(f);
+
+	f = fopen("/sys/fs/cgroup/memory/apps/memory.oom_control", "w");
+	if (!f)
+		pabort("fopen /sys/fs/cgroup/memory/apps/memory.oom_control");
+
+	if (fwrite(buf, i, 1, f) != 1)
+		pabort("fwrite apps/memory.oom_control\n");
+
+	fclose(f);
+}
+
+void add_pid_to_daemons_cgroup(pid_t pid)
+{
+	FILE *f;
+	char buf[4096];
+	int i;
+
+	f = fopen("/sys/fs/cgroup/memory/daemons/tasks", "w");
+	if (!f)
+		pabort("fopen /sys/fs/cgroup/memory/deamons/tasks");
+
+	i = sprintf(buf, "%u", (unsigned int)pid);
+	if (DEBUG)
+		printf("adding pid %u to daemons cgroup\n", pid);
+	if (fwrite(buf, i, 1, f) != 1)
+		pabort("fwrite daemons tasks\n");
+
+	fclose(f);
+}
+
+void add_pid_to_apps_cgroup(pid_t pid)
+{
+	FILE *f;
+	char buf[4096];
+	int i;
+
+	f = fopen("/sys/fs/cgroup/memory/apps/tasks", "w");
+	if (!f)
+		pabort("fopen /sys/fs/cgroup/memory/apps/tasks");
+
+	i = sprintf(buf, "%u", (unsigned int)pid);
+	if (DEBUG)
+		printf("adding pid %u to apps cgroup\n", pid);
+	if (fwrite(buf, i, 1, f) != 1)
+		pabort("fwrite apps tasks\n");
+
+	fclose(f);
+}
 
 static char *cg_class[] = { "daemons", "apps" };
 
@@ -77,6 +228,15 @@ long long get_mem_usage(int idx)
 	return thresb;
 }
 
+/**
+ *	setup_events - setup eventfd event
+ *	@pollfds: pollfd instance
+ *	@idx: task type index
+ *
+ *	Setups eventfd event for crossing mem_thresholds[@idx]
+ *	memory threshold (which is setup to memory.limit_in_bytes
+ *	minus 6 MiB) by memory.usage_in_bytes.
+ */
 int setup_events(struct pollfd *pollfds, int idx)
 {
 	struct mem_threshold *thres = &mem_thresholds[idx];
@@ -135,6 +295,12 @@ int setup_events(struct pollfd *pollfds, int idx)
 	return 0;
 }
 
+/**
+ *	cleanup_events - cleanup eventfd event
+ *	@idx: task type index
+ *
+ *	Cleanups eventfd event setup by setup_events().
+ */
 void cleanup_events(int idx)
 {
 	struct mem_threshold *thres = &mem_thresholds[idx];
@@ -146,6 +312,14 @@ void cleanup_events(int idx)
 	close(thres->mfd);
 }
 
+/**
+ *	process_events - process eventfd event
+ *	@idx: task type index
+ *
+ *	Processes eventfd event setup by setup_events().
+ *	In practice it just reads mem_thresholds[idx].efd
+ *	file descriptor.
+ */
 void process_event(int idx)
 {
 	struct mem_threshold *thres = &mem_thresholds[idx];

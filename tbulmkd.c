@@ -46,6 +46,20 @@ static int exemption_list_len;
 
 #define POLL_TIMEOUT 1000
 
+/**
+ *	select_pid_rss - select PID with the biggest RSS
+ *	@idx: task type index
+ *	@max_rss: maximum RSS value
+ *
+ *	Scans tasklist_mem list of tasks and selects the one with
+ *	the biggest RSS.  Skips tasks of THRES_DEAMONS_IDX type
+ *	without TTY and of THRES_APPS_IDX type with TTY.  Returns
+ *	PID of the task with biggest RSS value and sets @max_rss
+ *	to the biggest RSS value.
+ *
+ *	This function needs to take tasklist_sem->sem semaphore to
+ *	protect access to tasklist_mem task list.
+ */
 static pid_t select_pid_rss(int idx, ulong *max_rss)
 {
 	pid_t last_pid = 0;
@@ -90,6 +104,16 @@ static pid_t select_pid_rss(int idx, ulong *max_rss)
 	return last_pid;
 }
 
+/**
+ *	poll_lowmem - poll for tasks exceeding memory limits
+ *
+ *	Polls for tasks of THRES_DAEMONS_IDX and THRES_APPS_IDX types
+ *	that exceed memory limit.  Kills tasks with the biggest RSS
+ *	value while memory limit is exceeded.  Sleeps for 1 second
+ *	before selecting the next task to kill while memory limit is
+ *	exceeded.  This function is only used when cgroups suppport
+ *	is enabled.
+ */
 static void poll_lowmem(void)
 {
 	struct pollfd pollfds[THRES_NR];
@@ -142,8 +166,8 @@ static void poll_lowmem(void)
 
 static int timeout = 60; /* timeout in seconds */
 static int use_cgroups = 0;
-static int apps_mem_percent = 90;
-static int daemons_mem_percent = 10;
+int apps_mem_percent = 90;
+int daemons_mem_percent = 10;
 
 static void print_usage(char *argv0)
 {
@@ -207,6 +231,11 @@ static void parse_args(int argc, char *argv[])
 
 static int tasklist_fd;
 
+/**
+ *	init_tasklist - init tasklist_mem list of tasks
+ *
+ *	Opens and mmap()s shared memory area containing list of tasks.
+ */
 void init_tasklist(void)
 {
 	int ret;
@@ -226,6 +255,11 @@ void init_tasklist(void)
 		pabort("mmap tasklist");
 }
 
+/**
+ *	free_tasklist - free tasklist_mem list of tasks
+ *
+ *	munmap()s and closes shared memory area containing list of tasks.
+ */
 void free_tasklist(void)
 {
 	munmap(tasklist_mem, sizeof(*tasklist_mem));
@@ -289,156 +323,6 @@ static void free_config_file(void)
 	exemption_list_len = 0;
 }
 
-static void free_cgroup(void)
-{
-	rmdir("/sys/fs/cgroup/memory/apps");
-	rmdir("/sys/fs/cgroup/memory/daemons");
-	umount("/sys/fs/cgroup/memory");
-	rmdir("/sys/fs/cgroup/memory");
-	umount("/sys/fs/cgroup");
-}
-
-static void init_cgroups(void)
-{
-	FILE *f;
-	char buf[4096];
-	unsigned long int memtotal;
-	int i;
-	float t;
-
-	f = fopen("/proc/meminfo", "r");
-	if (!f)
-		pabort("fopen /proc/meminfo");
-
-	while (fgets(buf, sizeof(buf), f)) {
-		if (strstr(buf, "MemTotal")) {
-			if (sscanf(buf, "MemTotal: %lu kB", &memtotal) != 1) {
-				fclose(f);
-				return;
-			} else {
-				memtotal *= 1024;
-				break;
-			}
-		}
-	}
-
-	fclose(f);
-
-	if (DEBUG)
-		printf("memtotal: %lu\n", memtotal);
-
-	free_cgroup();
-
-	/* mount -t tmpfs none /sys/fs/cgroup */
-	if (mount(NULL, "/sys/fs/cgroup", "tmpfs", 0, NULL))
-		pabort("mount /sys/fs/cgroup");
-
-	/* mkdir /sys/fs/cgroup/memory */
-	if (mkdir("/sys/fs/cgroup/memory", 755))
-		pabort("mkdir /sys/fs/cgroup/memory");
-
-	/* mount -t cgroup none /sys/fs/cgroup/memory -o memory */
-	if (mount(NULL, "/sys/fs/cgroup/memory", "cgroup", 0, "memory"))
-		pabort("mount /sys/fs/cgroup/memory");
-
-	/* mkdir /sys/fs/cgroup/memory/daemons */
-	mkdir("/sys/fs/cgroup/memory/daemons", 755);
-//		pabort("mkdir /sys/fs/cgroup/memory/daemons");
-
-	/* echo 80%*MemTotal > /sys/fs/cgroup/memory/daemons/memory.limit_in_bytes */
-	f = fopen("/sys/fs/cgroup/memory/daemons/memory.limit_in_bytes", "w");
-	if (!f)
-		pabort("fopen /sys/fs/cgroup/memory/daemons/memory.limit_in_bytes");
-
-	t = (float)daemons_mem_percent / 100 * memtotal;
-	i = sprintf(buf, "%lu", (unsigned long int)t);
-	if (DEBUG)
-		printf("daemons limit: %s\n", buf);
-	if (fwrite(buf, i, 1, f) != 1)
-		pabort("fwrite daemons\n");
-
-	fclose(f);
-
-	/* mkdir /sys/fs/cgroup/memory/apps */
-	mkdir("/sys/fs/cgroup/memory/apps", 755);
-//		pabort("mkdir /sys/fs/cgroup/memory/apps");
-
-	/* echo 80%*MemTotal > /sys/fs/cgroup/memory/apps/memory.limit_in_bytes */
-	f = fopen("/sys/fs/cgroup/memory/apps/memory.limit_in_bytes", "w");
-	if (!f)
-		pabort("fopen /sys/fs/cgroup/memory/apps/memory.limit_in_bytes");
-
-	t = (float)apps_mem_percent / 100 * memtotal;
-	i = sprintf(buf, "%lu", (unsigned long int)t);
-	// debug
-//	i = sprintf(buf, "%lu", 100000000UL);
-	if (DEBUG)
-		printf("apps limit: %s\n", buf);
-	if (fwrite(buf, i, 1, f) != 1)
-		pabort("fwrite apps\n");
-
-	fclose(f);
-
-	/* disable kernel OOM killer */
-	i = sprintf(buf, "1");
-
-	f = fopen("/sys/fs/cgroup/memory/daemons/memory.oom_control", "w");
-	if (!f)
-		pabort("fopen /sys/fs/cgroup/memory/daemons/memory.oom_control");
-
-	if (fwrite(buf, i, 1, f) != 1)
-		pabort("fwrite daemons/memory.oom_control\n");
-
-	fclose(f);
-
-	f = fopen("/sys/fs/cgroup/memory/apps/memory.oom_control", "w");
-	if (!f)
-		pabort("fopen /sys/fs/cgroup/memory/apps/memory.oom_control");
-
-	if (fwrite(buf, i, 1, f) != 1)
-		pabort("fwrite apps/memory.oom_control\n");
-
-	fclose(f);
-}
-
-static void add_pid_to_daemons_cgroup(pid_t pid)
-{
-	FILE *f;
-	char buf[4096];
-	int i;
-
-	f = fopen("/sys/fs/cgroup/memory/daemons/tasks", "w");
-	if (!f)
-		pabort("fopen /sys/fs/cgroup/memory/deamons/tasks");
-
-	i = sprintf(buf, "%u", (unsigned int)pid);
-	if (DEBUG)
-		printf("adding pid %u to daemons cgroup\n", pid);
-	if (fwrite(buf, i, 1, f) != 1)
-		pabort("fwrite daemons tasks\n");
-
-	fclose(f);
-}
-
-static void add_pid_to_apps_cgroup(pid_t pid)
-{
-	FILE *f;
-	char buf[4096];
-	int i;
-
-	f = fopen("/sys/fs/cgroup/memory/apps/tasks", "w");
-	if (!f)
-		pabort("fopen /sys/fs/cgroup/memory/apps/tasks");
-
-	i = sprintf(buf, "%u", (unsigned int)pid);
-	if (DEBUG)
-		printf("adding pid %u to apps cgroup\n", pid);
-	if (fwrite(buf, i, 1, f) != 1)
-		pabort("fwrite apps tasks\n");
-
-	fclose(f);
-}
-
 #define MAX_LIVE_BG_TASKS 6
 
 struct bg_task {
@@ -483,6 +367,10 @@ int main(int argc, char *argv[])
 	while (1) {
 		int i, j;
 
+		/*
+		 * Take tasklist_sem->sem semaphore to protect access to tasklist_mem
+		 * task list.
+		 */
 		sem_wait(&tasklist_mem->sem);
 
 		memset(live_bg_tasks, 0, sizeof(struct bg_task) * MAX_LIVE_BG_TASKS);
@@ -495,6 +383,11 @@ int main(int argc, char *argv[])
 			if (!pid)
 				break;
 
+			/*
+			 * Find MAX_LIVE_BG_TASKS tasks with the biggest
+			 * time values (== most recent tasks) and keep them
+			 * in live_bg_tasks[].
+			 */
 			for (j = 0; j < MAX_LIVE_BG_TASKS; j++) {
 				struct bg_task *bt = &live_bg_tasks[j];
 				int k;
@@ -521,6 +414,18 @@ int main(int argc, char *argv[])
 		if (DEBUG)
 			print_bg_tasks();
 
+		/*
+		 * First scan tasklist_mem task list and:
+		 * - add tasks to corresponding (apps & deamons) cgroups
+		 *   (if cgroups support is enabled)
+		 * - skip tasks that are active or in live_bg_tasks[]
+		 * - skip tasks that are kernel threads (RSS == 0)
+		 * - skip tasks that are in exemption_list[]
+		 * - kill tasks that exceeded timeout value
+		 *
+		 * Then handle tasks exceeding memory limits (if cgroups
+		 * suppport is enabled) or sleep for 1 second (otherwise).
+		 */
 		for (i = 0; i < MAX_NR_TASKS; i++) {
 			struct task_info_shm *tis;
 			struct task_info ti;
