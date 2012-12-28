@@ -53,9 +53,10 @@ static int exemption_list_len;
  *
  *	Scans tasklist_mem list of tasks and selects the one with
  *	the biggest RSS.  Skips tasks of THRES_DEAMONS_IDX type
- *	without TTY and of THRES_APPS_IDX type with TTY.  Returns
- *	PID of the task with biggest RSS value and sets @max_rss
- *	to the biggest RSS value.
+ *	without TTY and of THRES_APPS_IDX type with TTY.  It also
+ *	verifies whether given task belongs to a corresponding
+ *	cgroup (identified by @idx).  Returns PID of the task with
+ *	biggest RSS value and sets @max_rss to the biggest RSS value.
  *
  *	This function needs to take tasklist_sem->sem semaphore to
  *	protect access to tasklist_mem task list.
@@ -80,6 +81,9 @@ static pid_t select_pid_rss(int idx, ulong *max_rss)
 
 		if ((idx == THRES_DAEMONS_IDX && tis->tty_nr) ||
 		    (idx == THRES_APPS_IDX && !tis->tty_nr))
+			continue;
+
+		if (!check_pid_in_cgroup(pid, idx))
 			continue;
 
 		if (get_task_info_stat(pid, NULL, &ti))
@@ -270,6 +274,16 @@ static char *config_file = "tbulmkd.cfg";
 
 #define MAX_TASK_NAME 100
 
+/**
+ *	init_config_file - initialize configuration
+ *
+ *	Parses config file (tbulmkd.cfg by default) and does
+ *	configuration initialization.  For now it just builds
+ *	the list of exempted tasks.
+ *
+ *	Please note that maximum task name is limited to 100
+ *	bytes currently.
+ */
 static void init_config_file(void)
 {
 	FILE *f;
@@ -313,6 +327,12 @@ static void print_exemption_list(void)
 	}
 }
 
+/**
+ *	free_config_file - free configuration
+ *
+ *	Frees configuration data.  For now it just frees the list
+ *	of exempted tasks.
+ */
 static void free_config_file(void)
 {
 	int i;
@@ -442,10 +462,23 @@ next_task:
 				 * TODO: this is just an approximation and should
 				 *       be accompanied by a list of exemptions..
 				 */
-				if (tis->tty_nr)
+				if (tis->tty_nr) {
 					add_pid_to_apps_cgroup(pid);
-				else
+//					printf("apps pid=%d in daemons: %d\n",
+//					       pid,
+//					       check_pid_in_cgroup(pid, 0));
+//					printf("apps pid=%d in apps: %d\n",
+//					       pid,
+//					       check_pid_in_cgroup(pid, 1));
+				} else {
 					add_pid_to_daemons_cgroup(pid);
+//					printf("daemons pid=%d in daemons: %d\n",
+//					       pid,
+//					       check_pid_in_cgroup(pid, 0));
+//					printf("daemons pid=%d in apps: %d\n",
+//					       pid,
+//					       check_pid_in_cgroup(pid, 1));
+				}
 			}
 
 			if (tis->activity)

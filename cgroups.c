@@ -24,7 +24,14 @@
 #include "tbulmkd.h"
 #include "common.h"
 
-void free_cgroup(void)
+/**
+ *	free_cgroups - free cgroups resources
+ *
+ *	Removes sysfs memory cgroups (apps & daemons), then
+ *	unmounts/removes cgroups memory controller subsystem and
+ *	finally unmounts cgroups subsystem itself.
+ */
+void free_cgroups(void)
 {
 	rmdir("/sys/fs/cgroup/memory/apps");
 	rmdir("/sys/fs/cgroup/memory/daemons");
@@ -33,6 +40,24 @@ void free_cgroup(void)
 	umount("/sys/fs/cgroup");
 }
 
+/**
+ *	init_cgroups - init cgroups resources
+ *
+ *	Mounts cgroups subsystem and creates/mounts cgroups memory
+ *	controller subsystem.  Then creates sysfs memory cgroups
+ *	(apps & daemons) and sets their memory limits (80% of total
+ *	memory by default for each cgroup).  Finally, it disables
+ *	the in-kernel OOM killer.
+ *
+ *	It depends on availability of /proc pseudo-filesystem for
+ *	getting the total memory amount in the system.
+ *
+ *	Before cgroups resources initialization starts the function
+ *	tries to free all cgroups resources (just in case).
+ *
+ *	TODO: try to discover whether cgroups resources are already
+ *	available
+ */
 void init_cgroups(void)
 {
 	FILE *f;
@@ -62,7 +87,7 @@ void init_cgroups(void)
 	if (DEBUG)
 		printf("memtotal: %lu\n", memtotal);
 
-	free_cgroup();
+	free_cgroups();
 
 	/* mount -t tmpfs none /sys/fs/cgroup */
 	if (mount(NULL, "/sys/fs/cgroup", "tmpfs", 0, NULL))
@@ -136,6 +161,12 @@ void init_cgroups(void)
 	fclose(f);
 }
 
+/**
+ *	add_pid_to_daemons_cgroup - add PID to daemons cgroup
+ *	@pid: task PID number
+ *
+ *	Adds given @pid to deamons cgroup's tasks file.
+ */
 void add_pid_to_daemons_cgroup(pid_t pid)
 {
 	FILE *f;
@@ -155,6 +186,12 @@ void add_pid_to_daemons_cgroup(pid_t pid)
 	fclose(f);
 }
 
+/**
+ *	add_pid_to_apps_cgroup - add PID to apps cgroup
+ *	@pid: task PID number
+ *
+ *	Adds given @pid to apps cgroup's tasks file.
+ */
 void add_pid_to_apps_cgroup(pid_t pid)
 {
 	FILE *f;
@@ -176,6 +213,14 @@ void add_pid_to_apps_cgroup(pid_t pid)
 
 static char *cg_class[] = { "daemons", "apps" };
 
+/**
+ *	get_mem_limit - get memory limit
+ *	@idx: task type index
+ *
+ *	Gets cgroup's (corresponding to given @idx) memory limit by
+ *	reading limit_in_bytes file.  Returns cgroup's memory limit
+ *	in bytes.
+ */
 static long long get_mem_limit(int idx)
 {
 	char buf[100];
@@ -202,6 +247,14 @@ static long long get_mem_limit(int idx)
 	return thresb;
 }
 
+/**
+ *	get_mem_usage - get memory usage
+ *	@idx: task type index
+ *
+ *	Gets cgroup's (corresponding to given @idx) memory usage by
+ *	reading usage_in_bytes file.  Returns cgroup's memory usage
+ *	in bytes.
+ */
 long long get_mem_usage(int idx)
 {
 	char buf[100];
@@ -236,6 +289,8 @@ long long get_mem_usage(int idx)
  *	Setups eventfd event for crossing mem_thresholds[@idx]
  *	memory threshold (which is setup to memory.limit_in_bytes
  *	minus 6 MiB) by memory.usage_in_bytes.
+ *
+ *	TODO: make memory threshold tunable
  */
 int setup_events(struct pollfd *pollfds, int idx)
 {
@@ -333,4 +388,40 @@ void process_event(int idx)
 	if (DEBUG)
 		printf("%s: res %lld B\n", cg_class[idx],
 			thres->mem_limit);
+}
+
+/**
+ *	check_pid_in_cgroup - check pid existance in cgroup's tasks file
+ *	@pid: task PID number
+ *	@idx: task type index
+ *
+ *	Checks @pid existance in cgroup's tasks file.  Returns '1' on
+ *	success, '0' on failure.
+ */
+int check_pid_in_cgroup(pid_t pid, int idx)
+{
+	FILE *f;
+	char buf[4096];
+	int i;
+	unsigned int tmp;
+
+	i = sprintf(buf, "/sys/fs/cgroup/memory/%s/tasks", cg_class[idx]);
+
+	f = fopen(buf, "r");
+	if (!f)
+		pabort("fopen tasks file");
+
+	while (fgets(buf, sizeof(buf), f)) {
+		if (sscanf(buf, "%u", &tmp) != 1) {
+			fclose(f);
+			return 0;
+		} else {
+			if (pid == tmp)
+				return 1;
+		}
+	}
+
+	fclose(f);
+
+	return 0;
 }

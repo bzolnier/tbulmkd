@@ -29,7 +29,7 @@ struct pollfd;
 int apps_mem_percent;
 int daemons_mem_percent;
 
-void free_cgroup(void);
+void free_cgroups(void);
 void init_cgroups(void);
 void add_pid_to_daemons_cgroup(pid_t pid);
 void add_pid_to_apps_cgroup(pid_t pid);
@@ -37,6 +37,7 @@ void add_pid_to_apps_cgroup(pid_t pid);
 int setup_events(struct pollfd *pollfds, int idx);
 void cleanup_events(int idx);
 void process_event(int idx);
+int check_pid_in_cgroup(pid_t pid, int idx);
 long long get_mem_usage(int idx);
 
 #endif
