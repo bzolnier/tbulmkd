@@ -1,0 +1,11 @@
+
+kernel/add-tbulmkd-entries.patch needs to be applied to the kernel
+that would be used with tbulmkd.  It adds /proc/$pid/activity and
+/proc/$pid/activity_time files.  Write '0' to activity file to mark
+the process as background one and '1' (the default value) to mark
+it as foreground one.  Please note that this interface is just for
+a demonstration of tbulmkd functionality and will be changed in
+the future.
+
+Use 'make' to build tbulmkd and proxy_shm programs (please remember
+that proxy_shm needs to be run before tbulmkd).

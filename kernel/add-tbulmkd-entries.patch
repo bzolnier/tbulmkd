@@ -1,0 +1,188 @@
+From: Bartlomiej Zolnierkiewicz <b.zolnierkie@samsung.com>
+Subject: [PATCH] Add tbulmkd /proc/$pid/ entries
+
+Signed-off-by: Bartlomiej Zolnierkiewicz <b.zolnierkie@samsung.com>
+Signed-off-by: Kyungmin Park <kyungmin.park@samsung.com>
+---
+ fs/proc/base.c        |  124 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ include/linux/sched.h |    3 +
+ kernel/fork.c         |    3 +
+ 3 files changed, 130 insertions(+)
+
+Index: b/fs/proc/base.c
+===================================================================
+--- a/fs/proc/base.c	2012-06-22 15:03:21.176130932 +0200
++++ b/fs/proc/base.c	2012-06-22 18:07:31.634925986 +0200
+@@ -975,6 +975,126 @@ static const struct file_operations proc
+ 	.llseek		= generic_file_llseek,
+ };
+ 
++static ssize_t activity_read(struct file *file, char __user *buf,
++				size_t count, loff_t *ppos)
++{
++	struct task_struct *task = get_proc_task(file->f_path.dentry->d_inode);
++	char buffer[PROC_NUMBUF];
++	size_t len;
++	int activity = -1;
++	unsigned long flags;
++
++	if (!task)
++		return -ESRCH;
++
++	if (lock_task_sighand(task, &flags)) {
++		/* set default init value to active */
++		if (task->signal->activity_time == 0) {
++			struct timeval ktv;
++
++			do_gettimeofday(&ktv);
++			task->signal->activity_time = ktv.tv_sec;
++			task->signal->activity = 1;
++		}
++		activity = task->signal->activity;
++		unlock_task_sighand(task, &flags);
++	}
++
++	put_task_struct(task);
++
++	len = snprintf(buffer, sizeof(buffer), "%d\n", activity);
++
++	return simple_read_from_buffer(buf, count, ppos, buffer, len);
++}
++
++static ssize_t activity_write(struct file *file, const char __user *buf,
++				size_t count, loff_t *ppos)
++{
++	struct task_struct *task;
++	char buffer[PROC_NUMBUF];
++	int activity;
++	unsigned long flags;
++	int err;
++
++	memset(buffer, 0, sizeof(buffer));
++	if (count > sizeof(buffer) - 1)
++		count = sizeof(buffer) - 1;
++	if (copy_from_user(buffer, buf, count)) {
++		err = -EFAULT;
++		goto out;
++	}
++
++	err = kstrtoint(strstrip(buffer), 0, &activity);
++	if (err)
++		goto out;
++	if ((activity < 0 || activity > 1) && activity != -1) {
++		err = -EINVAL;
++		goto out;
++	}
++
++	task = get_proc_task(file->f_path.dentry->d_inode);
++	if (!task) {
++		err = -ESRCH;
++		goto out;
++	}
++
++	task_lock(task);
++	if (!task->mm) {
++		err = -EINVAL;
++		goto err_task_lock;
++	}
++
++	if (!lock_task_sighand(task, &flags)) {
++		err = -ESRCH;
++		goto err_task_lock;
++	}
++
++	if (task->signal->activity != activity) {
++		struct timeval ktv;
++
++		do_gettimeofday(&ktv);
++		task->signal->activity_time = ktv.tv_sec;
++	}
++	task->signal->activity = activity;
++
++	unlock_task_sighand(task, &flags);
++err_task_lock:
++	task_unlock(task);
++	put_task_struct(task);
++out:
++	return err < 0 ? err : count;
++}
++
++static const struct file_operations proc_activity_operations = {
++	.read		= activity_read,
++	.write		= activity_write,
++	.llseek		= generic_file_llseek,
++};
++
++static int activity_time_read(struct task_struct *task, char *buffer)
++{
++	__kernel_time_t activity_time = -1;
++	unsigned long flags;
++
++	if (!task)
++		return -ESRCH;
++
++	if (lock_task_sighand(task, &flags)) {
++		/* set default init value to active */
++		if (task->signal->activity_time == 0) {
++			struct timeval ktv;
++
++			do_gettimeofday(&ktv);
++			task->signal->activity_time = ktv.tv_sec;
++			task->signal->activity = 1;
++		}
++		activity_time = task->signal->activity_time;
++		unlock_task_sighand(task, &flags);
++	}
++
++	return sprintf(buffer, "%u\n", (unsigned)activity_time);
++}
++
+ static ssize_t oom_score_adj_read(struct file *file, char __user *buf,
+ 					size_t count, loff_t *ppos)
+ {
+@@ -3010,6 +3130,8 @@ static const struct pid_entry tgid_base_
+ 	INF("oom_score",  S_IRUGO, proc_oom_score),
+ 	REG("oom_adj",    S_IRUGO|S_IWUSR, proc_oom_adjust_operations),
+ 	REG("oom_score_adj", S_IRUGO|S_IWUSR, proc_oom_score_adj_operations),
++	REG("activity",   S_IRUGO|S_IWUSR, proc_activity_operations),
++	INF("activity_time",  S_IRUGO, activity_time_read),
+ #ifdef CONFIG_AUDITSYSCALL
+ 	REG("loginuid",   S_IWUSR|S_IRUGO, proc_loginuid_operations),
+ 	REG("sessionid",  S_IRUGO, proc_sessionid_operations),
+@@ -3368,6 +3490,8 @@ static const struct pid_entry tid_base_s
+ 	INF("oom_score", S_IRUGO, proc_oom_score),
+ 	REG("oom_adj",   S_IRUGO|S_IWUSR, proc_oom_adjust_operations),
+ 	REG("oom_score_adj", S_IRUGO|S_IWUSR, proc_oom_score_adj_operations),
++	INF("activity_time", S_IRUGO, activity_time_read),
++	REG("activity",   S_IRUGO|S_IWUSR, proc_activity_operations),
+ #ifdef CONFIG_AUDITSYSCALL
+ 	REG("loginuid",  S_IWUSR|S_IRUGO, proc_loginuid_operations),
+ 	REG("sessionid",  S_IRUGO, proc_sessionid_operations),
+Index: b/include/linux/sched.h
+===================================================================
+--- a/include/linux/sched.h	2012-06-22 15:12:29.464130865 +0200
++++ b/include/linux/sched.h	2012-06-22 15:14:33.860130850 +0200
+@@ -665,6 +665,9 @@ struct signal_struct {
+ 	int oom_score_adj_min;	/* OOM kill score adjustment minimum value.
+ 				 * Only settable by CAP_SYS_RESOURCE. */
+ 
++	int activity;
++	__kernel_time_t activity_time;
++
+ 	struct mutex cred_guard_mutex;	/* guard against foreign influences on
+ 					 * credential calculations
+ 					 * (notably. ptrace) */
+Index: b/kernel/fork.c
+===================================================================
+--- a/kernel/fork.c	2012-06-22 15:22:21.684130794 +0200
++++ b/kernel/fork.c	2012-06-22 15:22:54.500130790 +0200
+@@ -1052,6 +1052,9 @@ static int copy_signal(unsigned long clo
+ 	sig->oom_score_adj = current->signal->oom_score_adj;
+ 	sig->oom_score_adj_min = current->signal->oom_score_adj_min;
+ 
++	sig->activity = current->signal->activity;
++	sig->activity_time = current->signal->activity_time;
++
+ 	sig->has_child_subreaper = current->signal->has_child_subreaper ||
+ 				   current->signal->is_child_subreaper;
+ 
